@@ -1,12 +1,13 @@
 """
 Gemini API File Search integration for RAG functionality.
+Uses the new google.genai SDK (not the legacy google.generativeai).
 """
 
 import os
-from typing import List, Optional
-import google.generativeai as genai
-from google.generativeai import caching
 import time
+from typing import List, Dict
+from google import genai
+from google.genai import types
 
 
 class GeminiRAG:
@@ -19,75 +20,70 @@ class GeminiRAG:
         Args:
             api_key: Google Gemini API key
         """
-        genai.configure(api_key=api_key)
+        self.client = genai.Client(api_key=api_key)
+        self.file_search_store = None
         self.uploaded_files = []
-        self.model = None
 
     def upload_files(self, file_paths: List[str]) -> List[str]:
         """
-        Upload transcript files to Gemini API.
+        Upload transcript files to Gemini API File Search store.
 
         Args:
             file_paths: List of file paths to upload
 
         Returns:
-            List of uploaded file URIs
+            List of uploaded file names
         """
-        print(f"\n☁️  Uploading {len(file_paths)} files to Gemini API...")
+        print(f"\n☁️  Setting up File Search store...")
 
-        uploaded_uris = []
+        # Create file search store
+        try:
+            self.file_search_store = self.client.file_search_stores.create(
+                config={'display_name': 'YouTube Transcripts RAG Store'}
+            )
+            print(f"✅ File Search store created: {self.file_search_store.name}")
+        except Exception as e:
+            print(f"❌ Error creating file search store: {e}")
+            return []
+
+        print(f"\n☁️  Uploading {len(file_paths)} files...")
+
+        uploaded_names = []
 
         for file_path in file_paths:
             try:
-                # Upload file
-                print(f"  ⏳ Uploading: {os.path.basename(file_path)}...", end=" ")
+                filename = os.path.basename(file_path)
+                print(f"  ⏳ Uploading: {filename}...", end=" ", flush=True)
 
-                uploaded_file = genai.upload_file(file_path)
+                # Upload file to file search store
+                operation = self.client.file_search_stores.upload_to_file_search_store(
+                    file=file_path,
+                    file_search_store_name=self.file_search_store.name,
+                    config={'display_name': filename}
+                )
 
-                # Wait for file to be processed
-                while uploaded_file.state.name == "PROCESSING":
+                # Wait for operation to complete
+                while not operation.done():
                     time.sleep(1)
-                    uploaded_file = genai.get_file(uploaded_file.name)
+                    operation = self.client.file_search_stores.get_operation(
+                        operation_name=operation.name
+                    )
 
-                if uploaded_file.state.name == "FAILED":
-                    print(f"❌ Failed")
+                if operation.error:
+                    print(f"❌ Failed: {operation.error}")
                     continue
 
-                self.uploaded_files.append(uploaded_file)
-                uploaded_uris.append(uploaded_file.uri)
+                self.uploaded_files.append(filename)
+                uploaded_names.append(filename)
                 print(f"✓")
 
             except Exception as e:
                 print(f"❌ Error: {e}")
 
-        print(f"\n✅ Successfully uploaded {len(uploaded_uris)} files")
-        return uploaded_uris
+        print(f"\n✅ Successfully uploaded {len(uploaded_names)} files")
+        return uploaded_names
 
-    def create_model_with_files(self, model_name: str = "gemini-1.5-flash-8b"):
-        """
-        Create a Gemini model configured with uploaded files for File Search.
-
-        Args:
-            model_name: Name of the Gemini model to use
-        """
-        if not self.uploaded_files:
-            raise ValueError("No files uploaded. Call upload_files() first.")
-
-        print(f"\n🤖 Creating model with File Search enabled...")
-
-        # Create model with File Search tool
-        self.model = genai.GenerativeModel(
-            model_name=model_name,
-            tools=[
-                genai.protos.Tool(
-                    file_search=genai.protos.FileSearchTool()
-                )
-            ]
-        )
-
-        print(f"✅ Model '{model_name}' ready with {len(self.uploaded_files)} files")
-
-    def query(self, question: str, temperature: float = 0.7) -> dict:
+    def query(self, question: str, temperature: float = 0.7) -> Dict:
         """
         Query the RAG system with a question.
 
@@ -98,28 +94,31 @@ class GeminiRAG:
         Returns:
             Dictionary with response and citations
         """
-        if not self.model:
-            raise ValueError("Model not initialized. Call create_model_with_files() first.")
+        if not self.file_search_store:
+            raise ValueError("File search store not initialized. Call upload_files() first.")
 
         try:
             # Generate response with file search
-            response = self.model.generate_content(
-                question,
-                generation_config=genai.types.GenerationConfig(
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",  # File Search requires Gemini 2.0+
+                contents=question,
+                config=types.GenerateContentConfig(
                     temperature=temperature,
-                ),
-                tools=[
-                    genai.protos.Tool(
-                        file_search=genai.protos.FileSearchTool(
-                            file_ids=[f.name for f in self.uploaded_files]
+                    tools=[
+                        types.Tool(
+                            file_search=types.FileSearch(
+                                file_search_store_names=[self.file_search_store.name]
+                            )
                         )
-                    )
-                ]
+                    ]
+                )
             )
 
             # Extract text and citations
+            answer_text = response.text if hasattr(response, 'text') else str(response)
+
             result = {
-                "answer": response.text,
+                "answer": answer_text,
                 "citations": self._extract_citations(response),
             }
 
@@ -131,7 +130,7 @@ class GeminiRAG:
                 "citations": []
             }
 
-    def _extract_citations(self, response) -> List[dict]:
+    def _extract_citations(self, response) -> List[Dict]:
         """
         Extract citations from the response.
 
@@ -143,42 +142,63 @@ class GeminiRAG:
         """
         citations = []
 
-        # Check if response has grounding metadata
-        if hasattr(response, 'candidates') and response.candidates:
-            candidate = response.candidates[0]
+        try:
+            # Try to extract grounding metadata
+            if hasattr(response, 'candidates') and response.candidates:
+                for candidate in response.candidates:
+                    if hasattr(candidate, 'grounding_metadata'):
+                        metadata = candidate.grounding_metadata
 
-            if hasattr(candidate, 'grounding_metadata'):
-                metadata = candidate.grounding_metadata
+                        # Extract grounding chunks
+                        if hasattr(metadata, 'grounding_chunks'):
+                            for chunk in metadata.grounding_chunks:
+                                citation = {
+                                    "text": getattr(chunk, 'text', ''),
+                                    "source": getattr(chunk, 'source', 'Unknown'),
+                                }
+                                if citation["text"]:
+                                    citations.append(citation)
 
-                if hasattr(metadata, 'grounding_chunks'):
-                    for chunk in metadata.grounding_chunks:
-                        citation = {
-                            "text": getattr(chunk, 'text', ''),
-                            "source": getattr(chunk, 'source', 'Unknown'),
-                        }
-                        citations.append(citation)
+                        # Extract search entry points
+                        if hasattr(metadata, 'search_entry_point'):
+                            entry = metadata.search_entry_point
+                            if hasattr(entry, 'rendered_content'):
+                                citations.append({
+                                    "text": entry.rendered_content[:200] + "...",
+                                    "source": "File Search"
+                                })
+        except Exception as e:
+            print(f"⚠️  Warning: Could not extract citations: {e}")
 
         return citations
 
     def cleanup(self):
-        """Delete uploaded files from Gemini API."""
-        print("\n🗑️  Cleaning up uploaded files...")
+        """Delete file search store and all uploaded files."""
+        if not self.file_search_store:
+            print("⚠️  No file search store to clean up")
+            return
 
-        for uploaded_file in self.uploaded_files:
-            try:
-                genai.delete_file(uploaded_file.name)
-                print(f"  ✓ Deleted: {uploaded_file.display_name}")
-            except Exception as e:
-                print(f"  ❌ Error deleting {uploaded_file.display_name}: {e}")
+        print("\n🗑️  Cleaning up file search store...")
 
-        self.uploaded_files = []
-        print("✅ Cleanup complete")
+        try:
+            self.client.file_search_stores.delete(
+                name=self.file_search_store.name
+            )
+            print(f"✅ Deleted file search store: {self.file_search_store.name}")
+            self.file_search_store = None
+            self.uploaded_files = []
+        except Exception as e:
+            print(f"❌ Error deleting file search store: {e}")
 
     def list_files(self):
         """List all uploaded files."""
-        print("\n📁 Uploaded files:")
-        for f in self.uploaded_files:
-            print(f"  - {f.display_name} ({f.uri})")
+        if not self.uploaded_files:
+            print("\n📁 No files uploaded yet")
+            return
+
+        print(f"\n📁 Uploaded files ({len(self.uploaded_files)}):")
+        for filename in self.uploaded_files:
+            print(f"  - {filename}")
 
 
 def test_gemini_rag():
@@ -196,6 +216,7 @@ def test_gemini_rag():
         This is a test transcript about artificial intelligence.
         AI and machine learning are transforming how we interact with technology.
         Large language models like GPT and Gemini can understand and generate human-like text.
+        The future of AI includes better reasoning, multimodal capabilities, and more efficient training.
         """)
 
     rag = GeminiRAG(api_key)
@@ -204,22 +225,25 @@ def test_gemini_rag():
         # Upload files
         rag.upload_files([test_file])
 
-        # Create model
-        rag.create_model_with_files()
+        # List files
+        rag.list_files()
 
         # Query
-        result = rag.query("What is this transcript about?")
-        print(f"\nAnswer: {result['answer']}")
+        print("\n💬 Testing query...")
+        result = rag.query("What topics are covered in this transcript?")
+        print(f"\n🤖 Answer:\n{result['answer']}")
 
         if result['citations']:
-            print("\nCitations:")
-            for citation in result['citations']:
-                print(f"  - {citation}")
+            print(f"\n📚 Citations ({len(result['citations'])}):")
+            for i, citation in enumerate(result['citations'], 1):
+                print(f"  [{i}] {citation.get('text', '')[:100]}...")
 
     finally:
         # Cleanup
         rag.cleanup()
-        os.remove(test_file)
+        if os.path.exists(test_file):
+            os.remove(test_file)
+            print(f"🗑️  Deleted test file: {test_file}")
 
 
 if __name__ == "__main__":

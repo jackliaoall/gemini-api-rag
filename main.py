@@ -164,7 +164,6 @@ def main():
 
         rag = GeminiRAG(gemini_key)
         rag.upload_files(file_paths)
-        rag.create_model_with_files()
 
         # Step 4: Start chat interface
         print("\n" + "=" * 80)

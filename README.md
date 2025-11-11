@@ -14,7 +14,7 @@ This tool scrapes video transcripts from a YouTube channel using Apify, stores t
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.9 or higher (required for google-genai SDK)
 - [Apify API Token](https://console.apify.com/account/integrations)
 - [Google Gemini API Key](https://aistudio.google.com/app/apikey)
 
@@ -30,6 +30,8 @@ cd gemini-api-rag
 ```bash
 pip install -r requirements.txt
 ```
+
+**Important:** This project uses the new `google-genai` SDK (not the legacy `google-generativeai`). File Search is only available in the new SDK, which requires Python 3.9+.
 
 3. Set up environment variables:
 ```bash

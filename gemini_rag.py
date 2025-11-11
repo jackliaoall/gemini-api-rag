@@ -97,16 +97,15 @@ class GeminiRAG:
 
         try:
             # Generate response with file search
+            # Use simplified syntax without types.Tool wrapper
             response = self.client.models.generate_content(
                 model="gemini-2.0-flash-exp",  # File Search requires Gemini 2.0+
                 contents=question,
                 config=types.GenerateContentConfig(
                     temperature=temperature,
                     tools=[
-                        types.Tool(
-                            file_search=types.FileSearch(
-                                file_search_store_names=[self.file_search_store.name]
-                            )
+                        types.FileSearch(
+                            file_search_store_names=[self.file_search_store.name]
                         )
                     ]
                 )

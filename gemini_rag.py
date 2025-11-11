@@ -63,13 +63,11 @@ class GeminiRAG:
                 )
 
                 # Wait for operation to complete
-                while not operation.done():
-                    time.sleep(1)
-                    operation = self.client.file_search_stores.get_operation(
-                        operation_name=operation.name
-                    )
+                while not operation.done:
+                    time.sleep(2)
+                    operation = self.client.operations.get(operation)
 
-                if operation.error:
+                if hasattr(operation, 'error') and operation.error:
                     print(f"❌ Failed: {operation.error}")
                     continue
 

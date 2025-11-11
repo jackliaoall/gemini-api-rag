@@ -38,7 +38,6 @@ ENV/
 
 # Transcript files
 transcripts/
-*.txt
 
 # OS
 .DS_Store
